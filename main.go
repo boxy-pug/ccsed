@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
 	substitution  Substitution
 	file          *os.File
-	lineRange     string
+	printSelected bool
 	doubleSpacing bool
 	editInPlace   bool
 }
@@ -21,7 +22,15 @@ type Substitution struct {
 	command     string
 	pattern     *regexp.Regexp
 	replacement string
-	flag        string
+	flag        SubstFlag
+	lineRange   []int
+}
+
+type SubstFlag struct {
+	global                bool
+	globalCaseInsensitive bool
+	delete                bool
+	print                 bool
 }
 
 func main() {
@@ -37,7 +46,7 @@ func loadConfig() Config {
 
 	// output a range of lines from the file. specify a range, i.e.
 	// for lines 2 to 4 we would use the command: cat -n ccsed -n '2,4p’ filename
-	flag.StringVar(&cfg.lineRange, "n", "", "output a range of lines from the file")
+	flag.BoolVar(&cfg.printSelected, "n", false, "only print selected")
 	flag.BoolVar(&cfg.doubleSpacing, "G", false, "double spacing a file")
 	flag.BoolVar(&cfg.editInPlace, "i", false, "edit in place")
 
@@ -61,22 +70,35 @@ func loadConfig() Config {
 		}
 	}
 
-	cfg.substitution, err = parseSubstitution(subst)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	if subst != "" {
+		cfg.substitution, err = parseSubstitution(subst, cfg)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 	}
 
 	return cfg
 }
 
-func parseSubstitution(subst string) (Substitution, error) {
+func parseSubstitution(subst string, cfg Config) (Substitution, error) {
 	var res Substitution
 	var err error
 
+	// the bufio scanner removes newlines so this doesnt work
+	if subst == "G" {
+		subst = "s/\n/\n\n/g"
+	}
+
 	substList := strings.Split(subst, "/")
-	if len(substList) != 4 {
-		err = fmt.Errorf("invalid substitution: %v", subst)
+
+	if len(substList) != 4 && cfg.printSelected {
+		res.lineRange, err = parseRangeExpression(subst)
+		if err == nil {
+			res.flag.print = true
+			return res, nil
+		}
+		err = fmt.Errorf("could not parse substitution: %v: %w", subst, err)
 		return res, err
 	}
 
@@ -87,12 +109,29 @@ func parseSubstitution(subst string) (Substitution, error) {
 		return res, err
 	}
 	res.replacement = substList[2]
-	res.flag = substList[3]
+	res.flag, err = parseSubstitutionFlag(substList[3])
+	if err != nil {
+		err = fmt.Errorf("invalid substitution flag: %v", substList[3])
+	}
 
 	//fmt.Printf("Parsed substitution:\n%v\n%v\n%v\n%v", res.command, res.pattern, res.replacement, res.flag)
 
 	return res, nil
+}
 
+func parseSubstitutionFlag(flag string) (SubstFlag, error) {
+	var res SubstFlag
+	switch flag {
+	case "g":
+		res.global = true
+	case "gi":
+		res.globalCaseInsensitive = true
+	case "d":
+		res.delete = true
+	case "p":
+		res.print = true
+	}
+	return res, nil
 }
 
 func substitute(cfg Config) {
@@ -102,5 +141,29 @@ func substitute(cfg Config) {
 
 	for scanner.Scan() {
 		fmt.Println(re.ReplaceAllString(scanner.Text(), repl))
+		if cfg.doubleSpacing {
+			fmt.Println()
+		}
 	}
+}
+
+func parseRangeExpression(subst string) ([]int, error) {
+	var res []int
+	splitOnComma := strings.Split(subst, ",")
+
+	startRange, err := strconv.Atoi(splitOnComma[0])
+	if err != nil {
+		return res, err
+	}
+	res = append(res, startRange)
+
+	secondPart := strings.TrimSuffix(splitOnComma[1], "p")
+
+	endRange, err := strconv.Atoi(secondPart)
+	if err != nil {
+		return res, err
+	}
+	res = append(res, endRange)
+
+	return res, nil
 }
