@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -14,8 +15,8 @@ type Config struct {
 	substitution  Substitution
 	file          *os.File
 	printSelected bool
-	doubleSpacing bool
 	editInPlace   bool
+	onlyRange     bool
 }
 
 type Substitution struct {
@@ -36,7 +37,9 @@ type SubstFlag struct {
 func main() {
 	cfg := loadConfig()
 
-	substitute(cfg)
+	substituteReader(cfg)
+
+	//substitute(cfg)
 
 }
 
@@ -47,7 +50,7 @@ func loadConfig() Config {
 	// output a range of lines from the file. specify a range, i.e.
 	// for lines 2 to 4 we would use the command: cat -n ccsed -n '2,4p’ filename
 	flag.BoolVar(&cfg.printSelected, "n", false, "only print selected")
-	flag.BoolVar(&cfg.doubleSpacing, "G", false, "double spacing a file")
+	//flag.BoolVar(&cfg.doubleSpacing, "G", false, "double spacing a file")
 	flag.BoolVar(&cfg.editInPlace, "i", false, "edit in place")
 
 	flag.Parse()
@@ -55,10 +58,10 @@ func loadConfig() Config {
 
 	subst := ""
 
-	if len(args) < 1 {
+	if len(args) == 0 {
 		fmt.Println("Please provide substitution and file as args")
 		os.Exit(1)
-	} else if len(args) < 2 {
+	} else if len(args) == 1 {
 		subst = args[0]
 		cfg.file = os.Stdin
 	} else {
@@ -78,40 +81,53 @@ func loadConfig() Config {
 		}
 	}
 
+	if len(cfg.substitution.lineRange) != 0 && cfg.printSelected {
+		cfg.onlyRange = true
+	}
+
 	return cfg
 }
 
 func parseSubstitution(subst string, cfg Config) (Substitution, error) {
+	defaultSubst := "s///g"
 	var res Substitution
 	var err error
+	var substList []string
 
-	// the bufio scanner removes newlines so this doesnt work
+	// the bufio scanner removes newlines so this doesnt work, should use reader
 	if subst == "G" {
 		subst = "s/\n/\n\n/g"
 	}
 
-	substList := strings.Split(subst, "/")
-
-	if len(substList) != 4 && cfg.printSelected {
-		res.lineRange, err = parseRangeExpression(subst)
-		if err == nil {
-			res.flag.print = true
-			return res, nil
+	for len(substList) != 4 {
+		substList = strings.Split(subst, "/")
+		if len(substList) == 4 {
+			break
 		}
-		err = fmt.Errorf("could not parse substitution: %v: %w", subst, err)
-		return res, err
+
+		if cfg.printSelected {
+			res.lineRange, err = parseRangeExpression(subst)
+			if err == nil {
+				res.flag.print = true
+				subst = defaultSubst
+			} else {
+				err = fmt.Errorf("could not parse substitution: %v: %w", subst, err)
+				return res, err
+			}
+		}
 	}
 
 	res.command = substList[0]
 	res.pattern, err = regexp.Compile(substList[1])
 	if err != nil {
-		err = fmt.Errorf("Not valid regex pattern: %v", substList[1])
+		err = fmt.Errorf("not valid regex pattern: %v", substList[1])
 		return res, err
 	}
 	res.replacement = substList[2]
 	res.flag, err = parseSubstitutionFlag(substList[3])
 	if err != nil {
 		err = fmt.Errorf("invalid substitution flag: %v", substList[3])
+		return res, err
 	}
 
 	//fmt.Printf("Parsed substitution:\n%v\n%v\n%v\n%v", res.command, res.pattern, res.replacement, res.flag)
@@ -135,14 +151,42 @@ func parseSubstitutionFlag(flag string) (SubstFlag, error) {
 }
 
 func substitute(cfg Config) {
+	numLines := 0
 	re := cfg.substitution.pattern
 	repl := cfg.substitution.replacement
 	scanner := bufio.NewScanner(cfg.file)
 
 	for scanner.Scan() {
+		numLines++
 		fmt.Println(re.ReplaceAllString(scanner.Text(), repl))
-		if cfg.doubleSpacing {
-			fmt.Println()
+	}
+}
+
+func substituteReader(cfg Config) {
+	numLines := 0
+	re := cfg.substitution.pattern
+	repl := cfg.substitution.replacement
+	reader := bufio.NewReader(cfg.file)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Println("Error reading:", err)
+			break
+		}
+		numLines++
+		if cfg.onlyRange {
+			start, end := cfg.substitution.lineRange[0], cfg.substitution.lineRange[1]
+			if numLines >= start && numLines <= end {
+				fmt.Printf("%d\t%s", numLines, re.ReplaceAllString(line, repl))
+			} else {
+				continue
+			}
+		} else {
+			fmt.Printf(re.ReplaceAllString(line, repl))
 		}
 	}
 }
@@ -150,6 +194,10 @@ func substitute(cfg Config) {
 func parseRangeExpression(subst string) ([]int, error) {
 	var res []int
 	splitOnComma := strings.Split(subst, ",")
+
+	if len(splitOnComma) != 2 {
+		return res, fmt.Errorf("invalid range expression: %s", subst)
+	}
 
 	startRange, err := strconv.Atoi(splitOnComma[0])
 	if err != nil {
